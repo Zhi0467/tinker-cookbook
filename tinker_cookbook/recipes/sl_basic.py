@@ -7,6 +7,8 @@ from tinker_cookbook.supervised import train
 from tinker_cookbook.supervised.data import FromConversationFileBuilder
 from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 import asyncio
+import os
+print(f"--- SCRIPT IS RUNNING FROM: {os.getcwd()} ---")
 
 
 def build_config_blueprint() -> chz.Blueprint[train.Config]:
@@ -16,13 +18,13 @@ def build_config_blueprint() -> chz.Blueprint[train.Config]:
         model_name_for_tokenizer=model_name,
         renderer_name=renderer_name,
         max_length=32768,
-        batch_size=128,
+        batch_size=32,
         train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES,
     )
-    dataset = chat_datasets.NoRobotsBuilder(common_config=common_config)
-    if 0:  # To swap in your own dataset:
+    # dataset = chat_datasets.NoRobotsBuilder(common_config=common_config)
+    if 1:  # To swap in your own dataset:
         dataset = FromConversationFileBuilder(
-            common_config=common_config, file_path="/path/to/your/dataset.jsonl"
+            common_config=common_config, file_path="data/reason_compression_sft.jsonl"
         )
         # ^^^ Create a dataset from a JSONL file in the same format as
         # example-data/conversations.jsonl
@@ -33,8 +35,8 @@ def build_config_blueprint() -> chz.Blueprint[train.Config]:
             "dataset_builder": dataset,
             "learning_rate": 2e-4,
             "lr_schedule": "linear",
-            "num_epochs": 1,
-            "eval_every": 8,
+            "num_epochs": 2,
+            "eval_every": 1,
         }
     )
 
