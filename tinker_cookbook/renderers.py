@@ -33,6 +33,7 @@ class Message(TypedDict):
     role: Role
     content: str
     tool_calls: NotRequired[list[ToolCall]]
+    thinking: NotRequired[str]
 
 
 class TrainOnWhat(StrEnum):
@@ -172,6 +173,7 @@ class RoleColonRenderer(Renderer):
     """
 
     def _render_message(self, message: Message) -> tuple[list[int], list[int], list[int]]:
+        assert message.get("thinking") is None, "Thinking tokens not supported in RoleColonRenderer"
         ob_str = message["role"].capitalize() + ":"
         # Observation (prompt) part
         ac_str = " " + message["content"] + "\n\n"
@@ -253,6 +255,7 @@ class Llama3Renderer(Renderer):
     """
 
     def _render_message(self, message: Message) -> tuple[list[int], list[int], list[int]]:
+        assert message.get("thinking") is None, "CoT tokens not supported in Llama3"
         ob_str = f"<|start_header_id|>{message['role']}<|end_header_id|>\n\n"
         # Observation (prompt) part
         ac_str = f"{message['content']}<|eot_id|>"
@@ -328,6 +331,7 @@ class Qwen3Renderer(Renderer):
     """
 
     def _render_message(self, idx: int, message: Message) -> tuple[list[int], list[int], list[int]]:
+        assert message.get("thinking") is None, "TODO: support CoT in Qwen3 renderer"
         maybe_newline = "\n" if idx > 0 else ""
         ob_str = f"{maybe_newline}<|im_start|>{message['role']}\n"
         ac_content = message["content"]
@@ -336,13 +340,20 @@ class Qwen3Renderer(Renderer):
             # <think> in the assistant messages, we so don't need to re-add it in those cases.
             ob_str += "<think>\n"
         # Observation (prompt) part
-        ac_str = f"{ac_content}<|im_end|>"
+        if "tool_calls" in message:
+            ac_content += "\n".join(
+                [
+                    f"<tool_call>\n{json.dumps(tool_call)}\n</tool_call>"
+                    for tool_call in message["tool_calls"]
+                ]
+            )
+        ac_content += "<|im_end|>"
         # Action part
         ac_tail_str = ""  # No action tail needed for Qwen format
         # Action part that's only included in the last message in SFT
         return (
             self.tokenizer.encode(ob_str, add_special_tokens=False),
-            self.tokenizer.encode(ac_str, add_special_tokens=False),
+            self.tokenizer.encode(ac_content, add_special_tokens=False),
             self.tokenizer.encode(ac_tail_str, add_special_tokens=False),
         )
 
@@ -405,11 +416,10 @@ class Qwen3Renderer(Renderer):
         if not parse_success:
             return assistant_message, False
 
-        # NOTE:
-        # we use the <function_call>...</function_call> tag to wrap the tool call.
-        match = re.search(
-            r"<function_call>(.*?)</function_call>", assistant_message["content"], re.DOTALL
-        )
+        # Follow Qwen docs and Qwen-Agent's tool calling prompt to use <tool_call>...</tool_call> tags to wrap the tool call.
+        # - https://qwen.readthedocs.io/en/latest/getting_started/concepts.html#tool-calling
+        # - https://github.com/QwenLM/Qwen-Agent/blob/main/qwen_agent/llm/fncall_prompts/nous_fncall_prompt.py#L279-L282
+        match = re.search(r"<tool_call>(.*?)</tool_call>", assistant_message["content"], re.DOTALL)
         if match:
             tool_calls = self._parse_tool_call(match.group(1))
             if tool_calls is None:
@@ -441,6 +451,7 @@ class Qwen3InstructRenderer(Qwen3Renderer):
     """
 
     def _render_message(self, idx: int, message: Message) -> tuple[list[int], list[int], list[int]]:
+        assert message.get("thinking") is None, "CoT tokens not supported in Qwen3 instruct 2507"
         maybe_newline = "\n" if idx > 0 else ""
         ob_str = f"{maybe_newline}<|im_start|>{message['role']}\n"
         ac_content = message["content"]
@@ -464,6 +475,7 @@ class DeepSeekV3Renderer(Renderer):
     """
 
     def _render_message(self, message: Message) -> tuple[list[int], list[int], list[int]]:
+        assert message.get("thinking") is None, "TODO: support CoT in DsV3 renderer"
         if message["role"] == "user":
             role_token = self._get_special_token("User")
         elif message["role"] == "assistant":
@@ -590,9 +602,26 @@ class GptOssRenderer(Renderer):
         # Action part
         ac_str = ""
         if message["role"] == "assistant":
-            # TODO: support other channels/tools
-            ac_str += "<|channel|>final"
-        ac_str += f"<|message|>{message['content']}"
+            # TODO: support commentary channel / tools
+
+            # Assistant channels. See https://cookbook.openai.com/articles/openai-harmony
+            thinking = message.get("thinking")
+            content = message.get("content", "")
+
+            # Analysis channel (CoT)
+            if thinking:
+                if is_last:
+                    # Analysis channel only included in the last message. See https://cookbook.openai.com/articles/gpt-oss/handle-raw-cot
+                    ac_str += f"<|channel|>analysis<|message|>{thinking}<|end|><|start|>assistant"
+
+            # Final channel (Response Content)
+            ac_str += f"<|channel|>final<|message|>{content}"
+        else:
+            assert message.get("thinking") is None, (
+                "Thinking is only allowed for assistant messages"
+            )
+            ac_str += f"<|message|>{message['content']}"
+
         if not is_last:
             ac_str += "<|end|>"
         else:
